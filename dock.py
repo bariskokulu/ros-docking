@@ -10,6 +10,7 @@ from actionlib_msgs.msg import *
 from move_base_msgs.msg import *
 from geometry_msgs.msg import Twist
 
+###         CONSTANTS
 MIN_GROUP_SIZE = 3
 MAX_DIST_FOR_CONSECUTIVE_POINTS = 0.025
 SPLIT_MERGE_TRESHOLD = 0.025
@@ -24,32 +25,32 @@ rx = 0 # last known x pos of the robot
 ry = 0 # last known y pos of the robot
 rz = 0 # last known z rot of the robot
 
-dockPoses = []
-dockRots = []
-averageDockPos = None
-averageDockRot = None
-targetDockPos = [0, 0]
-targetDockRot = 0
-global sac
-global velpub
-zibitticikti = False
+dockPoses = [] # detected poses of the dock
+dockRots = [] # detected rotations of the dock
+averageDockPos = None # average of the detected poses
+averageDockRot = None # average of the detected rotations
+targetDockPos = [0, 0] # the coordinates where we found the dock
+targetDockRot = 0 # the rotation of the found dock
+global sac # SimpleActionClient which we use to send goals to move_base node when we want the robot to use navigation
+global velpub # Publisher that we publish to to send velocity messages over cmd_vel_mux/input/navi topic when we need to move the robot directly
+zibitticikti = False # docked
 
-def odomcb(msg):
+def odomcb(msg):    # odometry callback function that updates the variables which hold robots axis
     global rx, ry, rz
     rx = msg.pose.pose.position.x
     ry = msg.pose.pose.position.y
     rz = math.degrees(tf.euler_from_quaternion([msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w])[2])
     pass
 
-def distance(a, b):
+def distance(a, b):     # distance of two points
     return math.sqrt((b[0]-a[0])**2+(b[1]-a[1])**2)
 
-def distanceToLine(p, a, b):
+def distanceToLine(p, a, b):    # distance of a point P to line [AB]
     d = distance(a, b)
     n = abs((b[0]-a[0])*(a[1]-p[1])-(a[0]-p[0])*(b[1]-a[1]))
     return n / d
 
-def findFarthestTwoPoints(points):
+def findFarthestTwoPoints(points):      # find most distant two points in a list of points
     maxdist = 0
     p3 = []
     p4 = []
@@ -62,7 +63,7 @@ def findFarthestTwoPoints(points):
                 p4 = points[j]
     return [p3, p4]
 
-def farthestPointToLine(points, a, b):
+def farthestPointToLine(points, a, b): # find the most distant point to the line [AB] from a list of points
     maxdist = 0
     farthestPoint = []
     for point in points:
@@ -73,7 +74,7 @@ def farthestPointToLine(points, a, b):
                 farthestPoint = point
     return [farthestPoint, maxdist]
 
-def farthestPointToLine2(points, a, b):
+def farthestPointToLine2(points, a, b): # same function as above but works better
     maxdist = 0
     farthestPoint = []
     for point in points:
@@ -97,7 +98,7 @@ def farthestPointToLine2(points, a, b):
                 farthestPoint = point
     return farthestPoint, maxdist
 
-def split(recursion, lines, points, a, b):
+def split(recursion, lines, points, a, b):  # splits the line into multiple lines if its curved
     farthestPoint, maxdist = farthestPointToLine2(points, a, b)
     if maxdist > SPLIT_MERGE_TRESHOLD and recursion < 5:
         recursion+=1
@@ -106,47 +107,54 @@ def split(recursion, lines, points, a, b):
     else:
         lines.append([a, b])
 
-def lineMiddlePoint(line):
+def lineMiddlePoint(line):  # find center of the line
     return [(line[1][0]+line[0][0])/2, (line[1][1]+line[0][1])/2]
 
-def lineLength(line):
+def lineLength(line):   # calculate length of the line
     return math.sqrt((line[1][0]-line[0][0])**2+(line[1][1]-line[0][1])**2)
 
-def commonPointOfTwoLines(l1, l2):
+# !!! used only on lines which have a common point!
+def commonPointOfTwoLines(l1, l2):  # find which end point of the lines is in common
     if l1[0] is l2[0]: return l1[0]
     if l1[0] is l2[1]: return l1[0]
     if l1[1] is l2[0]: return l1[1]
     if l1[1] is l2[1]: return l1[1]
 
-def angleBetweenTwoLines(l1, l2):
+def angleBetweenTwoLines(l1, l2):   # find the angle between two lines using dot product
     dot = (l1[1][0]-l1[0][0])*(l2[1][0]-l2[0][0])+(l1[1][1]-l1[0][1])*(l2[1][1]-l2[0][1])
     angle = math.degrees(math.acos(dot/lineLength(l1)/lineLength(l2)))
     return angle
 
-def checkLinesForDockInRealEnv(lines):
-    #print(len(lines))
-    if len(lines)!=2: return
-    print(angleBetweenTwoLines(lines[0], lines[1]))
 
-    score = 0
-    lengths = [lineLength(lines[0]), lineLength(lines[1])]
-    angles = [angleBetweenTwoLines(lines[0], lines[1])]
-    requiredLengths = [0.40, 0.40]
-    requiredAngles = [135]
 
-    for i in range(len(requiredLengths)):
-        if abs(requiredLengths[i]-lengths[i])<DOCK_LENGTH_TRESHOLD: score+=1
-    for i in range(len(requiredAngles)):
-        if abs(requiredAngles[i]-angles[i])<DOCK_ANGLE_TRESHOLD: score+=1
+### old function
 
-    if score >= 3: # yay we found the dock now we do the dockerinos
-        dockAt = commonPointOfTwoLines(lines[0], lines[1])
-        cOtherPoint = lines[1][0] if lines[1][1] is dockAt else lines[1][1]
-        bOtherPoint = lines[0][0] if lines[0][1] is dockAt else lines[0][1]
-        entrance = lineMiddlePoint([cOtherPoint, bOtherPoint])
-        dockAngle = angleBetweenTwoLines([dockAt, entrance], [dockAt, [dockAt[0]+1, dockAt[1]]])
-        dockAngle = math.degrees(math.atan2(entrance[1]-dockAt[1], entrance[0]-dockAt[0]))
-        dockFoundAt(dockAt, dockAngle)
+# def checkLinesForDockInRealEnv(lines): 
+#     #print(len(lines))
+#     if len(lines)!=2: return
+#     print(angleBetweenTwoLines(lines[0], lines[1]))
+
+#     score = 0
+#     lengths = [lineLength(lines[0]), lineLength(lines[1])]
+#     angles = [angleBetweenTwoLines(lines[0], lines[1])]
+#     requiredLengths = [0.40, 0.40]
+#     requiredAngles = [135]
+
+#     for i in range(len(requiredLengths)):
+#         if abs(requiredLengths[i]-lengths[i])<DOCK_LENGTH_TRESHOLD: score+=1
+#     for i in range(len(requiredAngles)):
+#         if abs(requiredAngles[i]-angles[i])<DOCK_ANGLE_TRESHOLD: score+=1
+
+#     if score >= 3: # yay we found the dock now we do the dockerinos
+#         dockAt = commonPointOfTwoLines(lines[0], lines[1])
+#         cOtherPoint = lines[1][0] if lines[1][1] is dockAt else lines[1][1]
+#         bOtherPoint = lines[0][0] if lines[0][1] is dockAt else lines[0][1]
+#         entrance = lineMiddlePoint([cOtherPoint, bOtherPoint])
+#         dockAngle = angleBetweenTwoLines([dockAt, entrance], [dockAt, [dockAt[0]+1, dockAt[1]]])
+#         dockAngle = math.degrees(math.atan2(entrance[1]-dockAt[1], entrance[0]-dockAt[0]))
+#         dockFoundAt(dockAt, dockAngle)
+
+### old function
 
 # check if lines match our custom dock made of 4 lines and 3 angles
 def checkLinesForDock(lines):
